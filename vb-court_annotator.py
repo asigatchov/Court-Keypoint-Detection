@@ -48,7 +48,8 @@ class VolleyballCourtAnnotator:
         self.not_visible_color = (0, 0, 255) # Red
         
         self.current_keypoint = 0
-        self.keypoints = []  # List of (x, y, visibility) for each keypoint
+        # Initialize all keypoints with visibility 0 (not visible) at start
+        self.keypoints = [(0, 0, 0) for _ in range(8)]  # List of (x, y, visibility) for each keypoint
         self.drawing = False
         
         # Initialize keypoints buffer for all images
@@ -97,13 +98,13 @@ class VolleyballCourtAnnotator:
                                 if i + 2 < len(kp_values):
                                     self.keypoints.append((kp_values[i], kp_values[i+1], kp_values[i+2]))
                                 else:
-                                    self.keypoints.append((-1, -1, 0))  # Default if incomplete
+                                    self.keypoints.append((0, 0, 0))  # Default if incomplete
                             print(f"Loaded existing annotations from {json_path}")
                             # Also store in buffer
                             self.keypoints_buffer[image_str] = self.keypoints.copy()
                         else:
                             # Initialize with empty keypoints
-                            self.keypoints = [(-1, -1, 0) for _ in range(8)]
+                            self.keypoints = [(0, 0, 0) for _ in range(8)]
                             # Initialize buffer for this image
                             self.keypoints_buffer[image_str] = self.keypoints.copy()
                     return True
@@ -111,13 +112,13 @@ class VolleyballCourtAnnotator:
                     print(f"Error loading annotations: {e}")
             else:
                 # Initialize with empty keypoints if no existing annotations
-                self.keypoints = [(-1, -1, 0) for _ in range(8)]
+                self.keypoints = [(0, 0, 0) for _ in range(8)]
                 # Initialize buffer for this image
                 self.keypoints_buffer[image_str] = self.keypoints.copy()
                 return False
         else:
             # Initialize with empty keypoints if no existing annotations
-            self.keypoints = [(-1, -1, 0) for _ in range(8)]
+            self.keypoints = [(0, 0, 0) for _ in range(8)]
             return False
     
     def save_annotations(self):
@@ -163,8 +164,9 @@ class VolleyballCourtAnnotator:
                 "name": "volleyball_court",
                 "keypoints": self.keypoints_names,
                 "skeleton": [
-                    [0, 4], [4, 1], [4, 6], [1, 2], 
-                    [2, 5], [5, 6], [6, 7], [3, 0]
+                    [0, 4], [4, 1], [1, 2], 
+                    [2, 5], [5, 3], [3, 0],
+                    [4,5],[4,6],[6,7],[7,5]
                 ]
             }]
         }
@@ -211,12 +213,12 @@ class VolleyballCourtAnnotator:
                 annotated_img = self.draw_annotations(self.current_image)
                 cv2.imshow('Volleyball Court Annotation', annotated_img)
         elif event == cv2.EVENT_MBUTTONDOWN:
-            # Middle click to delete current keypoint
-            self.keypoints[self.current_keypoint] = (-1, -1, 0)  # Reset to default
-            # Update buffer with the deleted keypoint
+            # Middle click to set current keypoint visibility to 0 with coordinates (0, 0)
+            self.keypoints[self.current_keypoint] = (0, 0, 0)  # Set to coordinates (0, 0) with visibility 0
+            # Update buffer with the modified keypoint
             image_path = str(self.image_files[self.current_image_idx])
             self.keypoints_buffer[image_path] = self.keypoints.copy()
-            print(f"Deleted keypoint '{self.keypoints_names[self.current_keypoint]}'")
+            print(f"Set keypoint '{self.keypoints_names[self.current_keypoint]}' to invisible at (0, 0)")
             # Redraw the image to show the change immediately
             if self.current_image is not None:
                 annotated_img = self.draw_annotations(self.current_image)
@@ -228,9 +230,9 @@ class VolleyballCourtAnnotator:
         
         # Draw skeleton connections
         skeleton = [
-            [0, 4], [4, 1], [4, 6], [1, 2], 
-            [2, 5], [5, 3], [6, 7], [3, 0],
-            [4,6],[7,5],[4,5]
+            [0, 4], [4, 1], [1, 2], 
+            [2, 5], [5, 3], [3, 0],
+            [4,5],[4,6],[6,7],[7,5]
         ]
         
         for conn in skeleton:
@@ -238,14 +240,14 @@ class VolleyballCourtAnnotator:
             pt1 = self.keypoints[pt1_idx]
             pt2 = self.keypoints[pt2_idx]
             
-            # Only draw if both points are set
+            # Only draw if both points are visible (v > 0)
             if pt1[2] > 0 and pt2[2] > 0:  # Both visible
                 cv2.line(img_copy, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])), 
                         (200, 200, 200), 2)
         
         # Draw keypoints
         for i, (x, y, v) in enumerate(self.keypoints):
-            if v > 0:  # Only draw if point is set
+            if v > 0:  # Draw visible points
                 color = self.visible_color if v == 2 else self.not_visible_color
                 # Draw point
                 cv2.circle(img_copy, (int(x), int(y)), 8, color, -1)
@@ -256,12 +258,18 @@ class VolleyballCourtAnnotator:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 cv2.putText(img_copy, str(i), (int(x)+10, int(y)-10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+            else:  # Draw invisible points as smaller, semi-transparent circles
+                # Draw as smaller, gray circle with dashed border
+                cv2.circle(img_copy, (int(x), int(y)), 4, (128, 128, 128), 1, lineType=cv2.LINE_8)
+                # Draw keypoint number in gray
+                cv2.putText(img_copy, str(i), (int(x)+6, int(y)-6), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
         
         # Highlight current keypoint
         if self.current_keypoint < len(self.keypoints):
             curr_x, curr_y, curr_v = self.keypoints[self.current_keypoint]
-            if curr_v > 0:
-                cv2.circle(img_copy, (int(curr_x), int(curr_y)), 12, (0, 255, 255), 3)  # Yellow highlight
+            # Always highlight the current keypoint regardless of visibility
+            cv2.circle(img_copy, (int(curr_x), int(curr_y)), 12, (0, 255, 255), 3)  # Yellow highlight
         
         # Add info text
         h, w = img_copy.shape[:2]
@@ -337,10 +345,9 @@ class VolleyballCourtAnnotator:
                     if self.current_image_idx > 0:
                         self.current_image_idx -= 1
                 elif key == ord(' '):  # Space - skip keypoint
-                    # Mark current keypoint as not visible (0)
+                    # Mark current keypoint as not visible (0) with coordinates (0, 0)
                     if self.current_keypoint < len(self.keypoints):
-                        x, y, v = self.keypoints[self.current_keypoint]
-                        self.keypoints[self.current_keypoint] = (x, y, 0)
+                        self.keypoints[self.current_keypoint] = (0, 0, 0)
                         print(f"Skipped keypoint '{self.keypoints_names[self.current_keypoint]}'")
                         self.current_keypoint = (self.current_keypoint + 1) % 8
                 elif key == ord('s') or key == ord('S'):  # Save
