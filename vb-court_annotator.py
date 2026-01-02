@@ -55,6 +55,9 @@ class VolleyballCourtAnnotator:
         # Initialize keypoints buffer for all images
         self.keypoints_buffer = {}  # Dictionary to store keypoints for each image
         
+        # Clipboard buffer for copy/paste operations
+        self.clipboard_buffer = None  # Store keypoints for copy/paste between images
+        
         # Find all image files in the data directory
         image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
         for ext in image_extensions:
@@ -199,6 +202,78 @@ class VolleyballCourtAnnotator:
         
         return [min_x, min_y, width, height]
     
+    def copy_keypoints(self):
+        """Copy current keypoints to clipboard buffer"""
+        # Copy the current keypoints to the clipboard buffer
+        self.clipboard_buffer = self.keypoints.copy()
+        print(f"Keypoints copied to clipboard buffer. Current image: {self.image_files[self.current_image_idx].name}")
+    
+    def paste_keypoints(self):
+        """Paste keypoints from clipboard buffer to current image"""
+        if self.clipboard_buffer is not None:
+            # Apply the clipboard buffer to current keypoints
+            self.keypoints = self.clipboard_buffer.copy()
+            # Update buffer with the pasted keypoints
+            image_path = str(self.image_files[self.current_image_idx])
+            self.keypoints_buffer[image_path] = self.keypoints.copy()
+            print(f"Keypoints pasted from clipboard buffer to current image: {self.image_files[self.current_image_idx].name}")
+            # Redraw the image to show the pasted keypoints immediately
+            if self.current_image is not None:
+                annotated_img = self.draw_annotations(self.current_image)
+                cv2.imshow('Volleyball Court Annotation', annotated_img)
+        else:
+            print("Clipboard buffer is empty. Nothing to paste.")
+    
+    def delete_current_image(self):
+        """Delete current image and its associated JSON annotation file"""
+        if self.current_image_idx < len(self.image_files):
+            image_path = self.image_files[self.current_image_idx]
+            json_path = image_path.with_suffix('.json')
+            
+            # Delete the JSON annotation file if it exists
+            if json_path.exists():
+                json_path.unlink()
+                print(f"Deleted annotation file: {json_path}")
+            
+            # Delete the image file
+            image_path.unlink()
+            print(f"Deleted image file: {image_path}")
+            
+            # Remove the image from our list
+            deleted_image = self.image_files.pop(self.current_image_idx)
+            
+            # Remove from keypoints buffer
+            image_str = str(deleted_image)
+            if image_str in self.keypoints_buffer:
+                del self.keypoints_buffer[image_str]
+            
+            # Adjust current index if needed
+            if self.current_image_idx >= len(self.image_files) and self.current_image_idx > 0:
+                self.current_image_idx = len(self.image_files) - 1
+            elif self.current_image_idx >= len(self.image_files):
+                # If we're at the end and no more images, we're done
+                if len(self.image_files) == 0:
+                    print("All images deleted. Exiting...")
+                    cv2.destroyAllWindows()
+                    exit()
+            
+            print(f"Deleted image and annotation: {deleted_image.name}")
+            
+            # Reload the current image
+            if self.current_image_idx < len(self.image_files):
+                self.load_annotations()
+                # Show the next image
+                image_path = self.image_files[self.current_image_idx]
+                self.current_image = cv2.imread(str(image_path))
+                annotated_img = self.draw_annotations(self.current_image)
+                window_title = f'Volleyball Court Annotation - {self.image_files[self.current_image_idx].name}'
+                cv2.imshow('Volleyball Court Annotation', annotated_img)
+                cv2.setWindowTitle('Volleyball Court Annotation', window_title)
+            else:
+                print("No more images to display")
+                cv2.destroyAllWindows()
+                exit()
+    
     def mouse_callback(self, event, x, y, flags, param):
         """Mouse callback for handling clicks"""
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -292,6 +367,9 @@ class VolleyballCourtAnnotator:
             "P - Previous keypoint", 
             "SPACE - Skip keypoint",
             "S - Save annotations",
+            "D - Delete current image and annotation",
+            "Ctrl+C - Copy keypoints",
+            "Ctrl+V - Paste keypoints",
             '"]" - Next image',
             '"[" - Previous image',
             "ESC - Quit"
@@ -326,8 +404,10 @@ class VolleyballCourtAnnotator:
                 # Draw annotations on image
                 annotated_img = self.draw_annotations(self.current_image)
                 
-                # Show image
+                # Set window title to current file name
+                window_title = f'Volleyball Court Annotation - {self.image_files[self.current_image_idx].name}'
                 cv2.imshow('Volleyball Court Annotation', annotated_img)
+                cv2.setWindowTitle('Volleyball Court Annotation', window_title)
                 
                 # Wait for key press
                 key = cv2.waitKey(0) & 0xFF
@@ -356,19 +436,120 @@ class VolleyballCourtAnnotator:
                     # This would toggle between navigating keypoints vs images
                     # For now, let's just add a trackbar to distinguish modes
                     pass
+                elif key == ord('c') or key == ord('C'):  # Ctrl+C - Copy keypoints to clipboard buffer
+                    self.copy_keypoints()
+                elif key == ord('v') or key == ord('V'):  # Ctrl+V - Paste keypoints from clipboard buffer
+                    self.paste_keypoints()
+                elif key == ord('d') or key == ord('D'):  # Delete current image and annotation
+                    self.delete_current_image()
             else:
                 break
         
         cv2.destroyAllWindows()
 
+def extract_frames_from_video(video_path, output_dir, frame_step=30, target_width=1280):
+    """
+    Extract frames from video at specified intervals and resize them
+    
+    Args:
+        video_path (str): Path to input video file
+        output_dir (str): Directory to save extracted frames
+        frame_step (int): Step between frames (default: 30)
+        target_width (int): Target width for resizing (default: 1280)
+    """
+    import cv2
+    from pathlib import Path
+    
+    video_path = Path(video_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"Error: Could not open video {video_path}")
+        return []
+    
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    print(f"Video FPS: {fps:.2f}")
+    print(f"Total frames: {total_frames}")
+    print(f"Extracting every {frame_step} frames")
+    
+    frame_count = 0
+    saved_frames = []
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+            
+        # Process every frame_step frames
+        if frame_count % frame_step == 0:
+            # Resize frame to target width while maintaining aspect ratio
+            h, w = frame.shape[:2]
+            scale = target_width / w
+            new_height = int(h * scale)
+            resized_frame = cv2.resize(frame, (target_width, new_height), interpolation=cv2.INTER_AREA)
+            
+            # Save frame
+            frame_filename = f"frame_{frame_count:06d}.jpg"
+            frame_path = output_dir / frame_filename
+            cv2.imwrite(str(frame_path), resized_frame)
+            
+            saved_frames.append(frame_path)
+            print(f"Saved frame {frame_count} -> {frame_filename}")
+        
+        frame_count += 1
+    
+    cap.release()
+    print(f"Extracted {len(saved_frames)} frames to {output_dir}")
+    return saved_frames
+
+
 def main():
     parser = argparse.ArgumentParser(description='Volleyball Court Keypoints Annotation Tool')
     parser.add_argument('--data_dir', type=str, default='data', 
                        help='Directory containing images to annotate (default: data)')
+    parser.add_argument('--video_path', type=str, 
+                       help='Path to video file to extract frames from')
+    parser.add_argument('--frame_step', type=int, default=30,
+                       help='Step between frames when extracting from video (default: 30)')
+    parser.add_argument('--target_width', type=int, default=1280,
+                       help='Target width for resized frames (default: 1280)')
     
     args = parser.parse_args()
     
-    annotator = VolleyballCourtAnnotator(args.data_dir)
+    # If video path is provided, extract frames first
+    if args.video_path:
+        video_path = Path(args.video_path)
+        if not video_path.exists():
+            print(f"Error: Video file {video_path} does not exist")
+            return
+        
+        # Create output directory near the video file
+        output_dir = video_path.parent / f"{video_path.stem}_frames"
+        print(f"Extracting frames from {video_path} to {output_dir}")
+        
+        extracted_frames = extract_frames_from_video(
+            video_path=str(video_path),
+            output_dir=str(output_dir),
+            frame_step=args.frame_step,
+            target_width=args.target_width
+        )
+        
+        if not extracted_frames:
+            print("No frames extracted. Exiting.")
+            return
+        
+        # Use the extracted frames directory for annotation
+        data_dir = str(output_dir)
+        print(f"Starting annotation on extracted frames in {data_dir}")
+    else:
+        # Use provided data directory
+        data_dir = args.data_dir
+    
+    annotator = VolleyballCourtAnnotator(data_dir)
     annotator.run()
 
 if __name__ == "__main__":
