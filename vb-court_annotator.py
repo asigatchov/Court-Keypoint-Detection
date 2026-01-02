@@ -447,7 +447,7 @@ class VolleyballCourtAnnotator:
         
         cv2.destroyAllWindows()
 
-def extract_frames_from_video(video_path, output_dir, frame_step=30, target_width=1280):
+def extract_frames_from_video(video_path, output_dir, frame_step=30, target_width=1280, mirror=False):
     """
     Extract frames from video at specified intervals and resize them
     
@@ -456,6 +456,7 @@ def extract_frames_from_video(video_path, output_dir, frame_step=30, target_widt
         output_dir (str): Directory to save extracted frames
         frame_step (int): Step between frames (default: 30)
         target_width (int): Target width for resizing (default: 1280)
+        mirror (bool): Whether to horizontally flip frames (default: False)
     """
     import cv2
     from pathlib import Path
@@ -475,6 +476,8 @@ def extract_frames_from_video(video_path, output_dir, frame_step=30, target_widt
     print(f"Video FPS: {fps:.2f}")
     print(f"Total frames: {total_frames}")
     print(f"Extracting every {frame_step} frames")
+    if mirror:
+        print("Mirroring frames (horizontal flip)")
     
     frame_count = 0
     saved_frames = []
@@ -492,9 +495,13 @@ def extract_frames_from_video(video_path, output_dir, frame_step=30, target_widt
             new_height = int(h * scale)
             resized_frame = cv2.resize(frame, (target_width, new_height), interpolation=cv2.INTER_AREA)
             
+            # Mirror frame if requested (horizontal flip)
+            if mirror:
+                resized_frame = cv2.flip(resized_frame, 1)  # 1 means horizontal flip
+            
             # Save frame
             frame_filename = f"frame_{frame_count:06d}.jpg"
-            frame_path = output_dir / frame_filename
+            frame_path = f'{output_dir}_{frame_filename}'
             cv2.imwrite(str(frame_path), resized_frame)
             
             saved_frames.append(frame_path)
@@ -517,6 +524,8 @@ def main():
                        help='Step between frames when extracting from video (default: 30)')
     parser.add_argument('--target_width', type=int, default=1280,
                        help='Target width for resized frames (default: 1280)')
+    parser.add_argument('--mirror', action='store_true',
+                       help='Horizontally flip frames (mirror effect)')
     
     args = parser.parse_args()
     
@@ -535,7 +544,8 @@ def main():
             video_path=str(video_path),
             output_dir=str(output_dir),
             frame_step=args.frame_step,
-            target_width=args.target_width
+            target_width=args.target_width,
+            mirror=args.mirror
         )
         
         if not extracted_frames:
