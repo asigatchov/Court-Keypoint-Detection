@@ -10,11 +10,423 @@ import argparse
 import cv2
 import numpy as np
 from pathlib import Path
+from abc import ABC, abstractmethod
 
-class VolleyballCourtAnnotator:
+
+class FrameSource(ABC):
+    """Abstract base class for frame sources (directory or video)"""
+    
+    @abstractmethod
+    def get_frame(self, index):
+        """Get frame at specified index"""
+        pass
+    
+    @abstractmethod
+    def get_total_frames(self):
+        """Get total number of frames"""
+        pass
+    
+    @abstractmethod
+    def get_frame_name(self, index):
+        """Get frame name at specified index"""
+        pass
+    
+    @abstractmethod
+    def save_frame(self, index, frame):
+        """Save frame at specified index"""
+        pass
+    
+    @abstractmethod
+    def save_annotation(self, index, keypoints):
+        """Save annotation for frame at specified index"""
+        pass
+    
+    @abstractmethod
+    def delete_frame(self, index):
+        """Delete frame and annotation at specified index"""
+        pass
+    
+    @abstractmethod
+    def get_annotation_path(self, index):
+        """Get path to annotation file for frame at specified index"""
+        pass
+
+
+class DirectoryFrameSource(FrameSource):
+    """Frame source for directory containing image files"""
+    
     def __init__(self, data_dir):
         self.data_dir = Path(data_dir)
         self.image_files = []
+        
+        # Find all image files in the data directory
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
+        for ext in image_extensions:
+            self.image_files.extend(list(self.data_dir.glob(f'*{ext}')))
+            self.image_files.extend(list(self.data_dir.glob(f'*{ext.upper()}')))
+        
+        # Sort files for consistent ordering
+        self.image_files = sorted(self.image_files)
+        
+
+    def get_frame(self, index):
+        """Get frame at specified index"""
+        if index < 0 or index >= len(self.image_files):
+            return None
+        image_path = self.image_files[index]
+        return cv2.imread(str(image_path))
+    
+    def get_total_frames(self):
+        """Get total number of frames"""
+        return len(self.image_files)
+    
+    def get_frame_name(self, index):
+        """Get frame name at specified index"""
+        if index < 0 or index >= len(self.image_files):
+            return None
+        return self.image_files[index].name
+    
+    def save_frame(self, index, frame):
+        """Save frame at specified index - not needed for directory source"""
+        # For directory source, frame is already in place
+        pass
+    
+    def save_annotation(self, index, keypoints):
+        """Save annotation for frame at specified index"""
+        if index < 0 or index >= len(self.image_files):
+            return
+            
+        image_path = self.image_files[index]
+        image = cv2.imread(str(image_path))
+        height, width = image.shape[:2]
+        
+        # Convert keypoints to flat list [x1,y1,v1,x2,y2,v2,...]
+        keypoints_flat = []
+        for x, y, v in keypoints:
+            keypoints_flat.extend([x, y, v])
+        
+        # Create the COCO structure
+        coco_data = {
+            "images": [{
+                "id": 0,
+                "file_name": image_path.name,
+                "width": width,
+                "height": height
+            }],
+            "annotations": [{
+                "id": 0,
+                "image_id": 0,
+                "category_id": 0,
+                "keypoints": keypoints_flat,
+                "num_keypoints": sum(1 for x, y, v in keypoints if v > 0),
+                "bbox": self.calculate_bbox(keypoints_flat)
+            }],
+            "categories": [{
+                "id": 0,
+                "name": "volleyball_court",
+                "keypoints": [
+                    "1_back_left",      # 0
+                    "2_back_left",      # 1
+                    "3_back_right",     # 2
+                    "4_back_right",     # 3
+                    "5_center_left",    # 4
+                    "6_center_right",   # 5
+                    "7_net_left",       # 6
+                    "8_net_right"       # 7
+                ],
+                "skeleton": [
+                    [0, 4], [4, 1], [1, 2], 
+                    [2, 5], [5, 3], [3, 0],
+                    [4,5],[4,6],[6,7],[7,5]
+                ]
+            }]
+        }
+        
+        json_path = image_path.with_suffix('.json')
+        with open(json_path, 'w') as f:
+            json.dump(coco_data, f, indent=2)
+    
+    def delete_frame(self, index):
+        """Delete frame and annotation at specified index"""
+        if index < 0 or index >= len(self.image_files):
+            return
+            
+        image_path = self.image_files[index]
+        json_path = image_path.with_suffix('.json')
+        
+        # Delete the JSON annotation file if it exists
+        if json_path.exists():
+            json_path.unlink()
+        
+        # Delete the image file
+        image_path.unlink()
+        
+        # Remove the image from our list
+        self.image_files.pop(index)
+    
+    def get_annotation_path(self, index):
+        """Get path to annotation file for frame at specified index"""
+        if index < 0 or index >= len(self.image_files):
+            return None
+        return self.image_files[index].with_suffix('.json')
+    
+    def calculate_bbox(self, keypoints_flat):
+        """Calculate bounding box from keypoints [x1,y1,v1,x2,y2,v2,...]"""
+        visible_points = []
+        for i in range(0, len(keypoints_flat), 3):
+            x, y, v = keypoints_flat[i], keypoints_flat[i+1], keypoints_flat[i+2]
+            if v > 0:  # Only visible points
+                visible_points.append([x, y])
+        
+        if not visible_points:
+            return [0, 0, 1, 1]  # Default small bbox
+        
+        visible_points = np.array(visible_points)
+        min_x = int(np.min(visible_points[:, 0]))
+        min_y = int(np.min(visible_points[:, 1]))
+        max_x = int(np.max(visible_points[:, 0]))
+        max_y = int(np.max(visible_points[:, 1]))
+        
+        width = max_x - min_x
+        height = max_y - min_y
+        
+        return [min_x, min_y, width, height]
+
+
+class VideoFrameSource(FrameSource):
+    """Frame source for video files"""
+    
+    def __init__(self, video_path, frame_step=30, target_width=1280, mirror=False):
+        self.video_path = Path(video_path)
+        self.frame_step = frame_step
+        self.target_width = target_width
+        self.mirror = mirror
+        self.video_name = self.video_path.stem
+        if self.mirror:
+            self.output_dir = self.video_path.parent / f"{self.video_name}_mirror_frames"
+        else:
+            self.output_dir = self.video_path.parent / f"{self.video_name}_frames"
+        
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get list of frame numbers to process
+        cap = cv2.VideoCapture(str(self.video_path))
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video {self.video_path}")
+        
+        self.fps = cap.get(cv2.CAP_PROP_FPS)
+        self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        
+        # Collect frames to process (every frame_step-th frame)
+        self.frames_to_process = []
+        temp_frame_count = 0
+        while temp_frame_count < self.total_frames:
+            if temp_frame_count % self.frame_step == 0:
+                self.frames_to_process.append(temp_frame_count)
+            temp_frame_count += self.frame_step
+        
+        # Get actual image files in the output directory
+        self.image_files = []
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
+        for ext in image_extensions:
+            self.image_files.extend(list(self.output_dir.glob(f'*{ext}')))
+            self.image_files.extend(list(self.output_dir.glob(f'*{ext.upper()}')))
+        
+        # Sort files for consistent ordering
+        self.image_files = sorted(self.image_files)
+
+    def get_frame(self, index):
+        """Get frame at specified index"""
+        if index < 0 or index >= len(self.frames_to_process):
+            return None
+        
+        frame_num = self.frames_to_process[index]
+        
+        # Read the specific frame from video
+        cap = cv2.VideoCapture(str(self.video_path))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            return None
+        
+        # Resize frame to target width while maintaining aspect ratio
+        h, w = frame.shape[:2]
+        scale = self.target_width / w
+        new_height = int(h * scale)
+        resized_frame = cv2.resize(frame, (self.target_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        # Mirror frame if requested (horizontal flip)
+        if self.mirror:
+            resized_frame = cv2.flip(resized_frame, 1)  # 1 means horizontal flip
+        
+        return resized_frame
+    
+    def get_total_frames(self):
+        """Get total number of frames"""
+        return len(self.frames_to_process)
+    
+    def get_frame_name(self, index):
+        """Get frame name at specified index"""
+        if index < 0 or index >= len(self.frames_to_process):
+            return None
+        
+        frame_num = self.frames_to_process[index]
+        video_name = self.video_path.stem
+        if self.mirror:
+            video_name = f"{video_name}_mirror"
+        
+        return f"{video_name}_frame_{frame_num:06d}.jpg"
+    
+    def save_frame(self, index, frame):
+        """Save frame at specified index"""
+        if index < 0 or index >= len(self.frames_to_process):
+            return
+        
+        frame_num = self.frames_to_process[index]
+        video_name = self.video_path.stem
+        if self.mirror:
+            video_name = f"{video_name}_mirror"
+        
+        frame_filename = f"{video_name}_frame_{frame_num:06d}.jpg"
+        frame_path = self.output_dir / frame_filename
+        
+        cv2.imwrite(str(frame_path), frame)
+    
+    def save_annotation(self, index, keypoints):
+        """Save annotation for frame at specified index"""
+        if index < 0 or index >= len(self.frames_to_process):
+            return
+        
+        frame_num = self.frames_to_process[index]
+        video_name = self.video_path.stem
+        if self.mirror:
+            video_name = f"{video_name}_mirror"
+        
+        # Get the frame to determine dimensions
+        frame = self.get_frame(index)
+        if frame is None:
+            return
+        
+        height, width = frame.shape[:2]
+
+        # Convert keypoints to flat list [x1,y1,v1,x2,y2,v2,...]
+        keypoints_flat = []
+        for x, y, v in keypoints:
+            keypoints_flat.extend([x, y, v])
+
+        # Create the COCO structure
+        coco_data = {
+            "images": [{
+                "id": 0,
+                "file_name": self.get_frame_name(index),
+                "width": width,
+                "height": height
+            }],
+            "annotations": [{
+                "id": 0,
+                "image_id": 0,
+                "category_id": 0,
+                "keypoints": keypoints_flat,
+                "num_keypoints": sum(1 for x, y, v in keypoints if v > 0),
+                "bbox": self.calculate_bbox(keypoints_flat)
+            }],
+            "categories": [{
+                "id": 0,
+                "name": "volleyball_court",
+                "keypoints": [
+                    "1_back_left",      # 0
+                    "2_back_left",      # 1
+                    "3_back_right",     # 2
+                    "4_back_right",     # 3
+                    "5_center_left",    # 4
+                    "6_center_right",   # 5
+                    "7_net_left",       # 6
+                    "8_net_right"       # 7
+                ],
+                "skeleton": [
+                    [0, 4], [4, 1], [1, 2], 
+                    [2, 5], [5, 3], [3, 0],
+                    [4,5],[4,6],[6,7],[7,5]
+                ]
+            }]
+        }
+        
+        frame_name = self.get_frame_name(index)
+        json_filename = frame_name.replace('.jpg', '.json')
+        json_path = self.output_dir / json_filename
+        
+        with open(json_path, 'w') as f:
+            json.dump(coco_data, f, indent=2)
+    
+    def delete_frame(self, index):
+        """Delete frame and annotation at specified index"""
+        if index < 0 or index >= len(self.frames_to_process):
+            return
+        
+        frame_num = self.frames_to_process[index]
+        video_name = self.video_path.stem
+        if self.mirror:
+            video_name = f"{video_name}_mirror"
+        
+        frame_filename = f"{video_name}_frame_{frame_num:06d}.jpg"
+        json_filename = f"{video_name}_frame_{frame_num:06d}.json"
+        
+        frame_path = self.output_dir / frame_filename
+        json_path = self.output_dir / json_filename
+        
+        # Delete the JSON annotation file if it exists
+        if json_path.exists():
+            json_path.unlink()
+        
+        # Delete the image file
+        if frame_path.exists():
+            frame_path.unlink()
+        
+        # Remove from our list if it exists
+        if frame_path in self.image_files:
+            self.image_files.remove(frame_path)
+    
+    def get_annotation_path(self, index):
+        """Get path to annotation file for frame at specified index"""
+        if index < 0 or index >= len(self.frames_to_process):
+            return None
+        
+        frame_num = self.frames_to_process[index]
+        video_name = self.video_path.stem
+        if self.mirror:
+            video_name = f"{video_name}_mirror"
+        
+        json_filename = f"{video_name}_frame_{frame_num:06d}.json"
+        return self.output_dir / json_filename
+    
+    def calculate_bbox(self, keypoints_flat):
+        """Calculate bounding box from keypoints [x1,y1,v1,x2,y2,v2,...]"""
+        visible_points = []
+        for i in range(0, len(keypoints_flat), 3):
+            x, y, v = keypoints_flat[i], keypoints_flat[i+1], keypoints_flat[i+2]
+            if v > 0:  # Only visible points
+                visible_points.append([x, y])
+        
+        if not visible_points:
+            return [0, 0, 1, 1]  # Default small bbox
+        
+        visible_points = np.array(visible_points)
+        min_x = int(np.min(visible_points[:, 0]))
+        min_y = int(np.min(visible_points[:, 1]))
+        max_x = int(np.max(visible_points[:, 0]))
+        max_y = int(np.max(visible_points[:, 1]))
+        
+        width = max_x - min_x
+        height = max_y - min_y
+        
+        return [min_x, min_y, width, height]
+
+class VolleyballCourtAnnotator:
+    def __init__(self, frame_source):
+        self.frame_source = frame_source
         self.current_image_idx = 0
         self.current_image = None
         self.current_annotations = None
@@ -58,67 +470,64 @@ class VolleyballCourtAnnotator:
         # Clipboard buffer for copy/paste operations
         self.clipboard_buffer = None  # Store keypoints for copy/paste between images
         
-        # Find all image files in the data directory
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
-        for ext in image_extensions:
-            self.image_files.extend(list(self.data_dir.glob(f'*{ext}')))
-            self.image_files.extend(list(self.data_dir.glob(f'*{ext.upper()}')))
-        
-        # Sort files for consistent ordering
-        self.image_files = sorted(self.image_files)
-        
-        if not self.image_files:
-            print(f"No image files found in {self.data_dir}")
+        if self.frame_source.get_total_frames() == 0:
+            print(f"No frames found in source")
             sys.exit(1)
         
-        print(f"Found {len(self.image_files)} image files")
-        
+        print(f"Found {self.frame_source.get_total_frames()} frames")
+    
     def load_annotations(self):
         """Load existing annotations from JSON file if available, or from buffer"""
-        if self.current_image_idx < len(self.image_files):
-            image_path = self.image_files[self.current_image_idx]
-            json_path = image_path.with_suffix('.json')
-            
-            # Check if we have annotations in buffer for this image
-            image_str = str(image_path)
-            if image_str in self.keypoints_buffer:
-                # Load from buffer
-                self.keypoints = self.keypoints_buffer[image_str].copy()
-                print(f"Loaded annotations from buffer for {image_path.name}")
-            elif json_path.exists():
-                try:
-                    with open(json_path, 'r') as f:
-                        data = json.load(f)
-                        # Look for the annotation for this specific image
-                        if 'annotations' in data and len(data['annotations']) > 0:
-                            # Get the first annotation
-                            ann = data['annotations'][0]
-                            # keypoints format is [x1,y1,v1,x2,y2,v2,...]
-                            kp_values = ann.get('keypoints', [])
-                            # Convert to our format [(x, y, v), ...]
-                            self.keypoints = []
-                            for i in range(0, len(kp_values), 3):
-                                if i + 2 < len(kp_values):
-                                    self.keypoints.append((kp_values[i], kp_values[i+1], kp_values[i+2]))
-                                else:
-                                    self.keypoints.append((0, 0, 0))  # Default if incomplete
-                            print(f"Loaded existing annotations from {json_path}")
-                            # Also store in buffer
-                            self.keypoints_buffer[image_str] = self.keypoints.copy()
-                        else:
-                            # Initialize with empty keypoints
-                            self.keypoints = [(0, 0, 0) for _ in range(8)]
-                            # Initialize buffer for this image
-                            self.keypoints_buffer[image_str] = self.keypoints.copy()
-                    return True
-                except Exception as e:
-                    print(f"Error loading annotations: {e}")
+        if self.current_image_idx < self.frame_source.get_total_frames():
+            # Get frame name for buffer key
+            frame_name = self.frame_source.get_frame_name(self.current_image_idx)
+            if frame_name:
+                frame_path_str = str(self.frame_source.output_dir / frame_name) if hasattr(self.frame_source, 'output_dir') else frame_name
             else:
-                # Initialize with empty keypoints if no existing annotations
-                self.keypoints = [(0, 0, 0) for _ in range(8)]
-                # Initialize buffer for this image
-                self.keypoints_buffer[image_str] = self.keypoints.copy()
-                return False
+                frame_path_str = f"frame_{self.current_image_idx}"
+            
+            # Check if we have annotations in buffer for this frame
+            if frame_path_str in self.keypoints_buffer:
+                # Load from buffer
+                self.keypoints = self.keypoints_buffer[frame_path_str].copy()
+                print(f"Loaded annotations from buffer for {frame_name}")
+            else:
+                # Try to load from JSON file
+                json_path = self.frame_source.get_annotation_path(self.current_image_idx)
+                if json_path and json_path.exists():
+                    try:
+                        with open(json_path, 'r') as f:
+                            data = json.load(f)
+                            # Look for the annotation for this specific image
+                            if 'annotations' in data and len(data['annotations']) > 0:
+                                # Get the first annotation
+                                ann = data['annotations'][0]
+                                # keypoints format is [x1,y1,v1,x2,y2,v2,...]
+                                kp_values = ann.get('keypoints', [])
+                                # Convert to our format [(x, y, v), ...]
+                                self.keypoints = []
+                                for i in range(0, len(kp_values), 3):
+                                    if i + 2 < len(kp_values):
+                                        self.keypoints.append((kp_values[i], kp_values[i+1], kp_values[i+2]))
+                                    else:
+                                        self.keypoints.append((0, 0, 0))  # Default if incomplete
+                                print(f"Loaded existing annotations from {json_path}")
+                                # Also store in buffer
+                                self.keypoints_buffer[frame_path_str] = self.keypoints.copy()
+                            else:
+                                # Initialize with empty keypoints
+                                self.keypoints = [(0, 0, 0) for _ in range(8)]
+                                # Initialize buffer for this frame
+                                self.keypoints_buffer[frame_path_str] = self.keypoints.copy()
+                        return True
+                    except Exception as e:
+                        print(f"Error loading annotations: {e}")
+                else:
+                    # Initialize with empty keypoints if no existing annotations
+                    self.keypoints = [(0, 0, 0) for _ in range(8)]
+                    # Initialize buffer for this frame
+                    self.keypoints_buffer[frame_path_str] = self.keypoints.copy()
+                    return False
         else:
             # Initialize with empty keypoints if no existing annotations
             self.keypoints = [(0, 0, 0) for _ in range(8)]
@@ -126,59 +535,29 @@ class VolleyballCourtAnnotator:
     
     def save_annotations(self):
         """Save annotations in COCO format from buffer"""
-        if self.current_image_idx >= len(self.image_files):
+        if self.current_image_idx >= self.frame_source.get_total_frames():
             return
             
-        image_path = self.image_files[self.current_image_idx]
-        image = cv2.imread(str(image_path))
-        height, width = image.shape[:2]
+        # Get the frame to determine dimensions
+        frame = self.frame_source.get_frame(self.current_image_idx)
+        if frame is None:
+            return
+        height, width = frame.shape[:2]
         
-        # Get keypoints from buffer for this image
-        image_str = str(image_path)
-        if image_str in self.keypoints_buffer:
-            keypoints_to_save = self.keypoints_buffer[image_str]
+        # Get keypoints from buffer for this frame
+        frame_name = self.frame_source.get_frame_name(self.current_image_idx)
+        frame_path_str = str(self.frame_source.output_dir / frame_name) if hasattr(self.frame_source, 'output_dir') else frame_name
+        
+        if frame_path_str in self.keypoints_buffer:
+            keypoints_to_save = self.keypoints_buffer[frame_path_str]
         else:
             keypoints_to_save = self.keypoints
         
-        # Create COCO format annotation
-        # Convert keypoints to flat list [x1,y1,v1,x2,y2,v2,...]
-        keypoints_flat = []
-        for x, y, v in keypoints_to_save:
-            keypoints_flat.extend([x, y, v])
+        # Save the frame and annotation using the frame source
+        self.frame_source.save_frame(self.current_image_idx, frame)
+        self.frame_source.save_annotation(self.current_image_idx, keypoints_to_save)
         
-        # Create the COCO structure
-        coco_data = {
-            "images": [{
-                "id": 0,
-                "file_name": image_path.name,
-                "width": width,
-                "height": height
-            }],
-            "annotations": [{
-                "id": 0,
-                "image_id": 0,
-                "category_id": 0,
-                "keypoints": keypoints_flat,
-                "num_keypoints": sum(1 for x, y, v in keypoints_to_save if v > 0),
-                "bbox": self.calculate_bbox(keypoints_flat)
-            }],
-            "categories": [{
-                "id": 0,
-                "name": "volleyball_court",
-                "keypoints": self.keypoints_names,
-                "skeleton": [
-                    [0, 4], [4, 1], [1, 2], 
-                    [2, 5], [5, 3], [3, 0],
-                    [4,5],[4,6],[6,7],[7,5]
-                ]
-            }]
-        }
-        
-        json_path = image_path.with_suffix('.json')
-        with open(json_path, 'w') as f:
-            json.dump(coco_data, f, indent=2)
-        
-        print(f"Saved annotations to {json_path}")
+        print(f"Saved annotations for frame {frame_name}")
     
     def calculate_bbox(self, keypoints_flat):
         """Calculate bounding box from keypoints [x1,y1,v1,x2,y2,v2,...]"""
@@ -206,7 +585,8 @@ class VolleyballCourtAnnotator:
         """Copy current keypoints to clipboard buffer"""
         # Copy the current keypoints to the clipboard buffer
         self.clipboard_buffer = self.keypoints.copy()
-        print(f"Keypoints copied to clipboard buffer. Current image: {self.image_files[self.current_image_idx].name}")
+        frame_name = self.frame_source.get_frame_name(self.current_image_idx)
+        print(f"Keypoints copied to clipboard buffer. Current frame: {frame_name}")
     
     def paste_keypoints(self):
         """Paste keypoints from clipboard buffer to current image"""
@@ -214,9 +594,10 @@ class VolleyballCourtAnnotator:
             # Apply the clipboard buffer to current keypoints
             self.keypoints = self.clipboard_buffer.copy()
             # Update buffer with the pasted keypoints
-            image_path = str(self.image_files[self.current_image_idx])
-            self.keypoints_buffer[image_path] = self.keypoints.copy()
-            print(f"Keypoints pasted from clipboard buffer to current image: {self.image_files[self.current_image_idx].name}")
+            frame_name = self.frame_source.get_frame_name(self.current_image_idx)
+            frame_path_str = str(self.frame_source.output_dir / frame_name) if hasattr(self.frame_source, 'output_dir') else frame_name
+            self.keypoints_buffer[frame_path_str] = self.keypoints.copy()
+            print(f"Keypoints pasted from clipboard buffer to current frame: {frame_name}")
             # Redraw the image to show the pasted keypoints immediately
             if self.current_image is not None:
                 annotated_img = self.draw_annotations(self.current_image)
@@ -226,51 +607,39 @@ class VolleyballCourtAnnotator:
     
     def delete_current_image(self):
         """Delete current image and its associated JSON annotation file"""
-        if self.current_image_idx < len(self.image_files):
-            image_path = self.image_files[self.current_image_idx]
-            json_path = image_path.with_suffix('.json')
-            
-            # Delete the JSON annotation file if it exists
-            if json_path.exists():
-                json_path.unlink()
-                print(f"Deleted annotation file: {json_path}")
-            
-            # Delete the image file
-            image_path.unlink()
-            print(f"Deleted image file: {image_path}")
-            
-            # Remove the image from our list
-            deleted_image = self.image_files.pop(self.current_image_idx)
+        if self.current_image_idx < self.frame_source.get_total_frames():
+            # Use frame source to delete the frame
+            self.frame_source.delete_frame(self.current_image_idx)
             
             # Remove from keypoints buffer
-            image_str = str(deleted_image)
-            if image_str in self.keypoints_buffer:
-                del self.keypoints_buffer[image_str]
+            frame_name = self.frame_source.get_frame_name(self.current_image_idx)
+            frame_path_str = str(self.frame_source.output_dir / frame_name) if hasattr(self.frame_source, 'output_dir') else frame_name
+            if frame_path_str in self.keypoints_buffer:
+                del self.keypoints_buffer[frame_path_str]
             
-            # Adjust current index if needed
-            if self.current_image_idx >= len(self.image_files) and self.current_image_idx > 0:
-                self.current_image_idx = len(self.image_files) - 1
-            elif self.current_image_idx >= len(self.image_files):
-                # If we're at the end and no more images, we're done
-                if len(self.image_files) == 0:
-                    print("All images deleted. Exiting...")
+            # Adjust current index if needed - for now just move to next frame
+            if self.current_image_idx >= self.frame_source.get_total_frames() and self.current_image_idx > 0:
+                self.current_image_idx = self.frame_source.get_total_frames() - 1
+            elif self.current_image_idx >= self.frame_source.get_total_frames():
+                # If we're at the end and no more frames, we're done
+                if self.frame_source.get_total_frames() == 0:
+                    print("All frames deleted. Exiting...")
                     cv2.destroyAllWindows()
                     exit()
             
-            print(f"Deleted image and annotation: {deleted_image.name}")
+            print(f"Deleted frame and annotation")
             
             # Reload the current image
-            if self.current_image_idx < len(self.image_files):
+            if self.current_image_idx < self.frame_source.get_total_frames():
                 self.load_annotations()
                 # Show the next image
-                image_path = self.image_files[self.current_image_idx]
-                self.current_image = cv2.imread(str(image_path))
+                self.current_image = self.frame_source.get_frame(self.current_image_idx)
                 annotated_img = self.draw_annotations(self.current_image)
-                window_title = f'Volleyball Court Annotation - {self.image_files[self.current_image_idx].name}'
+                window_title = f'Volleyball Court Annotation - {self.frame_source.get_frame_name(self.current_image_idx)}'
                 cv2.imshow('Volleyball Court Annotation', annotated_img)
                 cv2.setWindowTitle('Volleyball Court Annotation', window_title)
             else:
-                print("No more images to display")
+                print("No more frames to display")
                 cv2.destroyAllWindows()
                 exit()
     
@@ -280,8 +649,9 @@ class VolleyballCourtAnnotator:
             # Left click to set current keypoint
             self.keypoints[self.current_keypoint] = (x, y, 2)  # 2 = labeled and visible
             # Update buffer with the new keypoint
-            image_path = str(self.image_files[self.current_image_idx])
-            self.keypoints_buffer[image_path] = self.keypoints.copy()
+            frame_name = self.frame_source.get_frame_name(self.current_image_idx)
+            frame_path_str = str(self.frame_source.output_dir / frame_name) if hasattr(self.frame_source, 'output_dir') else frame_name
+            self.keypoints_buffer[frame_path_str] = self.keypoints.copy()
             print(f"Set keypoint '{self.keypoints_names[self.current_keypoint]}' at ({x}, {y})")
             # Redraw the image to show the new keypoint immediately
             if self.current_image is not None:
@@ -291,8 +661,9 @@ class VolleyballCourtAnnotator:
             # Middle click to set current keypoint visibility to 0 with coordinates (0, 0)
             self.keypoints[self.current_keypoint] = (0, 0, 0)  # Set to coordinates (0, 0) with visibility 0
             # Update buffer with the modified keypoint
-            image_path = str(self.image_files[self.current_image_idx])
-            self.keypoints_buffer[image_path] = self.keypoints.copy()
+            frame_name = self.frame_source.get_frame_name(self.current_image_idx)
+            frame_path_str = str(self.frame_source.output_dir / frame_name) if hasattr(self.frame_source, 'output_dir') else frame_name
+            self.keypoints_buffer[frame_path_str] = self.keypoints.copy()
             print(f"Set keypoint '{self.keypoints_names[self.current_keypoint]}' to invisible at (0, 0)")
             # Redraw the image to show the change immediately
             if self.current_image is not None:
@@ -348,9 +719,9 @@ class VolleyballCourtAnnotator:
         
         # Add info text
         h, w = img_copy.shape[:2]
-        cv2.putText(img_copy, f"Image: {self.current_image_idx + 1}/{len(self.image_files)}", 
+        cv2.putText(img_copy, f"Frame: {self.current_image_idx + 1}/{self.frame_source.get_total_frames()}", 
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(img_copy, f"Image: {self.current_image_idx + 1}/{len(self.image_files)}", 
+        cv2.putText(img_copy, f"Frame: {self.current_image_idx + 1}/{self.frame_source.get_total_frames()}", 
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
         
         cv2.putText(img_copy, f"Keypoint: {self.current_keypoint} - {self.keypoints_names[self.current_keypoint]}", 
@@ -367,6 +738,7 @@ class VolleyballCourtAnnotator:
             "P - Previous keypoint", 
             "SPACE - Skip keypoint",
             "S - Save annotations",
+            "A - Auto mode (next frame + paste + save)",
             "D - Delete current image and annotation",
             "Ctrl+C - Copy keypoints",
             "Ctrl+V - Paste keypoints",
@@ -382,46 +754,47 @@ class VolleyballCourtAnnotator:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
         
         return img_copy
-    
+
     def run(self):
         """Main annotation loop"""
         cv2.namedWindow('Volleyball Court Annotation', cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback('Volleyball Court Annotation', self.mouse_callback)
         
+        fps = 0
         while True:
-            # Load current image
-            if self.current_image_idx < len(self.image_files):
-                image_path = self.image_files[self.current_image_idx]
-                self.current_image = cv2.imread(str(image_path))
+            # Load current frame
+            if self.current_image_idx < self.frame_source.get_total_frames():
+                self.current_image = self.frame_source.get_frame(self.current_image_idx)
                 
                 if self.current_image is None:
-                    print(f"Could not load image: {image_path}")
+                    print(f"Could not load frame: {self.current_image_idx}")
                     continue
                 
                 # Load existing annotations or initialize
                 self.load_annotations()
                 
-                # Draw annotations on image
+                # Draw annotations on frame
                 annotated_img = self.draw_annotations(self.current_image)
                 
                 # Set window title to current file name
-                window_title = f'Volleyball Court Annotation - {self.image_files[self.current_image_idx].name}'
+                window_title = f'Volleyball Court Annotation - {self.frame_source.get_frame_name(self.current_image_idx)}'
                 cv2.imshow('Volleyball Court Annotation', annotated_img)
                 cv2.setWindowTitle('Volleyball Court Annotation', window_title)
                 
                 # Wait for key press
-                key = cv2.waitKey(0) & 0xFF
+                key = cv2.waitKey(fps) & 0xFF
                 
                 if key == 27:  # ESC key
                     break
                 elif key == ord('n') or key == ord('N'):  # Next keypoint
+                    fps = 0
                     self.current_keypoint = (self.current_keypoint + 1) % 8
                 elif key == ord('p') or key == ord('P'):  # Previous keypoint
                     self.current_keypoint = (self.current_keypoint - 1) % 8
-                elif key == ord(']'):  # Next image
-                    if self.current_image_idx < len(self.image_files) - 1:
+                elif key == ord(']'):  # Next frame
+                    if self.current_image_idx < self.frame_source.get_total_frames() - 1:
                         self.current_image_idx += 1
-                elif key == ord('['):  # Previous image
+                elif key == ord('['):  # Previous frame
                     if self.current_image_idx > 0:
                         self.current_image_idx -= 1
                 elif key == ord(' '):  # Space - skip keypoint
@@ -432,86 +805,44 @@ class VolleyballCourtAnnotator:
                         self.current_keypoint = (self.current_keypoint + 1) % 8
                 elif key == ord('s') or key == ord('S'):  # Save
                     self.save_annotations()
-                elif key == ord('m') or key == ord('M'):  # Toggle mode (keypoint/image navigation)
-                    # This would toggle between navigating keypoints vs images
+                elif key == ord('m') or key == ord('M'):  # Toggle mode (keypoint/frame navigation)
+                    # This would toggle between navigating keypoints vs frames
                     # For now, let's just add a trackbar to distinguish modes
                     pass
                 elif key == ord('c') or key == ord('C'):  # Ctrl+C - Copy keypoints to clipboard buffer
                     self.copy_keypoints()
                 elif key == ord('v') or key == ord('V'):  # Ctrl+V - Paste keypoints from clipboard buffer
                     self.paste_keypoints()
-                elif key == ord('d') or key == ord('D'):  # Delete current image and annotation
+                elif key == ord('a') or key == ord('A'):  # Auto mode - go to next frame, paste keypoints from buffer, and save
+                    # Go to next frame
+                    fps = 0
+                    if self.current_image_idx < self.frame_source.get_total_frames() - 1:
+                        self.current_image_idx += 1
+                        # Paste keypoints from clipboard buffer if available
+                        if self.clipboard_buffer is not None:
+                            fps = 1
+                            self.paste_keypoints()
+                            # Save the annotations
+                            self.save_annotations()
+                            print(f"Auto mode: Navigated to next frame, pasted keypoints and saved")
+                        else:
+                            print(f"Auto mode: Navigated to next frame, but clipboard buffer is empty")
+                    else:
+                        print(f"Auto mode: Already at the last frame")
+                elif key == ord('d') or key == ord('D'):  # Delete current frame and annotation
                     self.delete_current_image()
+
+                if fps != 0 and self.clipboard_buffer is not None:
+                    self.current_image_idx += 1
+                    self.paste_keypoints()
+                    # Save the annotations
+                    self.save_annotations()
+                    print(f"Auto mode: Navigated to next frame, pasted keypoints and saved")
+
             else:
                 break
         
         cv2.destroyAllWindows()
-
-def extract_frames_from_video(video_path, output_dir, frame_step=30, target_width=1280, mirror=False):
-    """
-    Extract frames from video at specified intervals and resize them
-    
-    Args:
-        video_path (str): Path to input video file
-        output_dir (str): Directory to save extracted frames
-        frame_step (int): Step between frames (default: 30)
-        target_width (int): Target width for resizing (default: 1280)
-        mirror (bool): Whether to horizontally flip frames (default: False)
-    """
-    import cv2
-    from pathlib import Path
-    
-    video_path = Path(video_path)
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        print(f"Error: Could not open video {video_path}")
-        return []
-    
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    print(f"Video FPS: {fps:.2f}")
-    print(f"Total frames: {total_frames}")
-    print(f"Extracting every {frame_step} frames")
-    if mirror:
-        print("Mirroring frames (horizontal flip)")
-    
-    frame_count = 0
-    saved_frames = []
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-            
-        # Process every frame_step frames
-        if frame_count % frame_step == 0:
-            # Resize frame to target width while maintaining aspect ratio
-            h, w = frame.shape[:2]
-            scale = target_width / w
-            new_height = int(h * scale)
-            resized_frame = cv2.resize(frame, (target_width, new_height), interpolation=cv2.INTER_AREA)
-            
-            # Mirror frame if requested (horizontal flip)
-            if mirror:
-                resized_frame = cv2.flip(resized_frame, 1)  # 1 means horizontal flip
-            
-            # Save frame
-            frame_filename = f"frame_{frame_count:06d}.jpg"
-            frame_path = f'{output_dir}_{frame_filename}'
-            cv2.imwrite(str(frame_path), resized_frame)
-            
-            saved_frames.append(frame_path)
-            print(f"Saved frame {frame_count} -> {frame_filename}")
-        
-        frame_count += 1
-    
-    cap.release()
-    print(f"Extracted {len(saved_frames)} frames to {output_dir}")
-    return saved_frames
 
 
 def main():
@@ -529,37 +860,26 @@ def main():
     
     args = parser.parse_args()
     
-    # If video path is provided, extract frames first
+    # Create the appropriate frame source based on arguments
     if args.video_path:
         video_path = Path(args.video_path)
         if not video_path.exists():
             print(f"Error: Video file {video_path} does not exist")
             return
         
-        # Create output directory near the video file
-        output_dir = video_path.parent / f"{video_path.stem}_frames"
-        print(f"Extracting frames from {video_path} to {output_dir}")
-        
-        extracted_frames = extract_frames_from_video(
+        # Create VideoFrameSource
+        frame_source = VideoFrameSource(
             video_path=str(video_path),
-            output_dir=str(output_dir),
             frame_step=args.frame_step,
             target_width=args.target_width,
             mirror=args.mirror
         )
-        
-        if not extracted_frames:
-            print("No frames extracted. Exiting.")
-            return
-        
-        # Use the extracted frames directory for annotation
-        data_dir = str(output_dir)
-        print(f"Starting annotation on extracted frames in {data_dir}")
     else:
-        # Use provided data directory
-        data_dir = args.data_dir
+        # Create DirectoryFrameSource
+        frame_source = DirectoryFrameSource(args.data_dir)
     
-    annotator = VolleyballCourtAnnotator(data_dir)
+    # Create and run the annotator with the frame source
+    annotator = VolleyballCourtAnnotator(frame_source)
     annotator.run()
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+[project]
+name = "courtdetector"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "tqdm>=4.67.1",
+    "ultralytics>=8.3.244",
+    "opencv-python>=4.8.0",
+]
