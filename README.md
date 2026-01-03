@@ -12,6 +12,7 @@ The model detects 8 key court keypoints and connects them to reconstruct court l
 
 ### Example Detection
 
+![Volleyball Court Annotator](https://raw.githubusercontent.com/asigatchov/Court-Keypoint-Detection/refs/heads/main/imgs/Volleyball_Court.jpg)
 
 ## Features
 
