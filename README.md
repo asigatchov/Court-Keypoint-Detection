@@ -18,7 +18,7 @@ The model detects 8 key court keypoints and connects them to reconstruct court l
 
 - **Custom annotation tool** (vb-court_annotator.py) for manual keypoint labeling
 - Dataset preparation scripts (split, merge COCO JSONs, convert to YOLO format)
-- Training scripts for **YOLOv11m-pose** and **YOLOv11x-pose** with tuned hyperparameters
+- Training scripts for **YOLOv11m-pose** and **YOLOv11s-pose** with tuned hyperparameters
 - Multi-court inference script (supports volleyball, tennis, badminton – easily extensible)
 - Real-time visualization with FPS counter and pause/resume
 
@@ -63,20 +63,26 @@ text
     Bash
     
     ```
-    git clone https://github.com/yourusername/volleyball-court-yolo.git
-    cd volleyball-court-yolo
+    git clone https://github.com/asigatchov/Court-Keypoint-Detection.git
+    cd Court-Keypoint-Detection
     ```
     
 2. **Install dependencies**
     
     Bash
-    
+
+    **with venv** 
     ```
     python -m venv venv
     source venv/bin/activate  # On Windows: venv\Scripts\activate
     pip install ultralytics opencv-python tqdm
+
     ```
-    
+
+   **with uv tools**
+    ```
+    uv sync
+    ```
 
 ## Workflow
 
@@ -130,7 +136,7 @@ Bash
 python run_v11m.py
 ```
 
-Start with yolo11m-pose.pt. Switch to yolo11x-pose.pt for higher accuracy.
+Start with yolo11s-pose.pt. Switch to yolo11m-pose.pt for higher accuracy.
 
 Weights and logs appear in runs/yolo11m_pose/....
 
