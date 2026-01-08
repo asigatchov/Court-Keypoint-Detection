@@ -14,6 +14,8 @@ The model detects 8 key court keypoints and connects them to reconstruct court l
 
 ![Volleyball Court Annotator](https://raw.githubusercontent.com/asigatchov/Court-Keypoint-Detection/refs/heads/main/imgs/Volleyball_Court.jpg)
 
+[Article Volleyball Court detection](https://recdev.ru/blog/5/)
+
 ## Features
 
 - **Custom annotation tool** (vb-court_annotator.py) for manual keypoint labeling
